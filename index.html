@@ -1,0 +1,108 @@
+<!-- frontend/index.html  – drop-in ready -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Movie Poster Match</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:sans-serif;background:#111;color:#fff;display:flex;flex-direction:column;align-items:center}
+    h1{margin:20px 0}
+    #container{display:flex;flex-wrap:wrap;max-width:800px;justify-content:space-between;align-items:center;padding:20px;width:100%}
+    #left-panel,#right-panel{flex:1 1 320px;margin:10px;position:relative}
+    video,canvas,img{width:100%;border-radius:8px;border:2px solid #333}
+    #capture{display:none}
+    #ready-btn,#reset-btn{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);padding:10px 20px;border:none;border-radius:4px;font-size:16px;cursor:pointer}
+    #ready-btn{background:#00cc66}
+    #reset-btn{background:#cc3300;display:none}
+    #share-buttons{margin-top:20px;display:none}
+    #share-buttons button{margin:0 5px;padding:10px 15px;font-size:14px;border:none;border-radius:4px;cursor:pointer}
+  </style>
+</head>
+<body>
+  <h1>Movie Poster Match</h1>
+
+  <div id="container">
+    <div id="left-panel">
+      <video id="camera" autoplay playsinline></video>
+      <canvas id="capture"></canvas>
+      <button id="reset-btn">Reset</button>
+    </div>
+
+    <div id="right-panel">
+      <img id="match-image" src="stormcastle-count-down.gif" alt="Matching..." />
+      <button id="ready-btn">Ready</button>
+    </div>
+  </div>
+
+  <div id="share-buttons">
+    <button id="share-twitter">Share on Twitter</button>
+    <button id="share-facebook">Share on Facebook</button>
+  </div>
+
+  <script>
+    const API_URL = '/match';  // same-origin API
+
+    const video       = document.getElementById('camera');
+    const canvas      = document.getElementById('capture');
+    const readyBtn    = document.getElementById('ready-btn');
+    const resetBtn    = document.getElementById('reset-btn');
+    const matchImage  = document.getElementById('match-image');
+    const shareBtns   = document.getElementById('share-buttons');
+
+    // request webcam
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => { video.srcObject = stream; })
+      .catch(err => { alert('Camera access error: ' + err); });
+
+    readyBtn.addEventListener('click', () => {
+      // grab frame
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // UI toggle
+      video.style.display = 'none';
+      canvas.style.display = 'block';
+      readyBtn.style.display = 'none';
+      resetBtn.style.display = 'block';
+      matchImage.src = 'stormcastle-count-down.gif';
+      shareBtns.style.display = 'none';
+
+      // send to API
+      canvas.toBlob(blob => {
+        const fd = new FormData();
+        fd.append('image', blob, 'selfie.jpg');
+        fetch(API_URL, { method: 'POST', body: fd })
+          .then(r => r.json())
+          .then(data => {
+            matchImage.src = data.match_composite_url;
+            shareBtns.style.display = 'block';
+          })
+          .catch(err => alert('Upload error: ' + err));
+      }, 'image/jpeg');
+    });
+
+    resetBtn.addEventListener('click', () => {
+      canvas.style.display = 'none';
+      video.style.display  = 'block';
+      readyBtn.style.display = 'block';
+      resetBtn.style.display = 'none';
+      matchImage.src = 'stormcastle-count-down.gif';
+      shareBtns.style.display = 'none';
+    });
+
+    document.getElementById('share-twitter').addEventListener('click', () => {
+      const url = encodeURIComponent(matchImage.src);
+      const text = encodeURIComponent('Check out my movie-poster match!');
+      window.open(`https://twitter.com/intent/tweet?text=${text}&url=${url}`, '_blank');
+    });
+
+    document.getElementById('share-facebook').addEventListener('click', () => {
+      const url = encodeURIComponent(matchImage.src);
+      window.open(`https://www.facebook.com/sharer/sharer.php?u=${url}`, '_blank');
+    });
+  </script>
+</body>
+</html>
