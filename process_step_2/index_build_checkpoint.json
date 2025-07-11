@@ -1,0 +1,10 @@
+{
+  "status": "complete",
+  "timestamp": "1752217630.1337123",
+  "data": {
+    "total_vectors": 14061,
+    "feature_dimensions": 4694,
+    "index_file": "context_aware_poster_index.faiss",
+    "metadata_file": "context_aware_poster_metadata.json"
+  }
+}
