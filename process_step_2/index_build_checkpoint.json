@@ -1,10 +1,10 @@
 {
   "status": "complete",
-  "timestamp": "1752217630.1337123",
+  "timestamp": "2025-07-11T22:18:52.265002",
   "data": {
-    "total_vectors": 14061,
-    "feature_dimensions": 4694,
-    "index_file": "context_aware_poster_index.faiss",
-    "metadata_file": "context_aware_poster_metadata.json"
+    "total_vectors": 2061,
+    "feature_dimensions": 2052,
+    "index_file": "/var/llm/movieNight/movieNight/process_step_2/context_aware_poster_index.faiss",
+    "metadata_file": "/var/llm/movieNight/movieNight/process_step_2/context_aware_poster_metadata.json"
   }
 }

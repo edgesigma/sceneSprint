@@ -3,448 +3,246 @@
 Context-Aware Feature Extraction for Movie Poster Matching
 ==========================================================
 
-This script extracts enhanced features that consider pose context:
-- Analyzes pose type (face_only, portrait, half_body, full_body)
-- Extracts context-specific features
-- Applies adaptive weighting based on content
-- Stores rich metadata for smart matching
+This script extracts features for movie posters, focusing on:
+- 4x4 grid-based HSV color histograms for spatial color information.
+- Binned person count (0, 1, 2, 3+) to capture audience size context.
 
-Features extracted:
-- Pose features (66D) - MediaPipe landmarks
-- Enhanced color features (4608D) - 3x3 grid histograms  
-- Context features (20D) - pose type, body parts, face prominence
-- Metadata: pose_type, compatibility_scores, detected_keypoints, etc.
+The output is a TSV file mapping each image filename to its feature vector.
 """
 
 import cv2
 import numpy as np
 import mediapipe as mp
-import json
 import os
 from pathlib import Path
 from tqdm import tqdm
 import argparse
+import json
+from PIL import Image
+
+# Get the directory where the script is located
+SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
-COVERS_DIR = '../covers'
-OUTPUT_FILE = 'context_aware_poster_features.jsonl'
-GRID_SIZE = (3, 3)
-BINS_PER_CHANNEL = 8
-NUM_KEYPOINTS = 33
-MIN_POSE_CONFIDENCE = 0.1
+COVERS_DIR = SCRIPT_DIR / '../covers'
+OUTPUT_FILE = SCRIPT_DIR / 'features.tsv'
+GRID_SIZE = (4, 4)
+# HSV bins: 8 for Hue, 4 for Saturation, 4 for Value
+H_BINS = 8
+S_BINS = 4
+V_BINS = 4
+CONFIG_FILE = SCRIPT_DIR / '../config.json'
 
-# Context feature dimensions
-CONTEXT_FEATURE_SIZE = 20
-
-# Pose type encodings
-POSE_TYPES = {
-    'none': 0,
-    'face_only': 1, 
-    'portrait': 2,
-    'half_body': 3,
-    'full_body': 4,
-    'partial': 5
-}
-
-# ─── POSE CONTEXT ANALYSIS ──────────────────────────────────────────────────
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(
-    static_image_mode=True,
-    min_detection_confidence=0.1,
-    min_tracking_confidence=0.1
-)
-
-def analyze_pose_context(image):
-    """Advanced pose context analysis for movie posters"""
+def load_weights(config_file=CONFIG_FILE):
+    """Loads feature weights from the config file."""
+    if not os.path.exists(config_file):
+        print(f"Warning: Config file not found at {config_file}. Using default weights.")
+        return {"color": 1.0, "person": 1.0}
     
-    strategies = [
-        ("Original", image),
-        ("Resized_640", cv2.resize(image, (640, 480))),
-        ("Enhanced_Contrast", cv2.convertScaleAbs(image, alpha=1.3, beta=15)),
-        ("Histogram_Equalized", cv2.equalizeHist(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY))),
-    ]
+    with open(config_file, 'r') as f:
+        config = json.load(f)
     
-    best_result = None
-    best_confidence = 0
-    best_strategy = "none"
-    
-    # Try multiple detection strategies
-    for strategy_name, processed_img in strategies:
-        if len(processed_img.shape) == 2:
-            processed_img = cv2.cvtColor(processed_img, cv2.COLOR_GRAY2BGR)
+    return config.get("feature_weights", {"color": 1.0, "person": 1.0})
+
+# ─── POSE DETECTION FOR PERSON COUNT ─────────────────────────────────────────
+# Initialize MediaPipe Pose
+mp_pose = mp.solutions.pose # type: ignore
+# Use a try-except block for environments where mediapipe might not be fully installed
+try:
+    pose_detector = mp_pose.Pose(
+        static_image_mode=True,
+        min_detection_confidence=0.3,
+        min_tracking_confidence=0.3
+    )
+except Exception as e:
+    print(f"Warning: Could not initialize MediaPipe Pose. Person detection will be disabled. Error: {e}")
+    pose_detector = None
+
+def detect_person_count(image):
+    """
+    Detects the number of people in an image.
+    NOTE: MediaPipe's Pose model is optimized for a single person.
+    This function provides a basic estimate and will count 1 if a pose is detected.
+    """
+    if pose_detector is None:
+        return 0
         
-        rgb_image = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
-        results = pose.process(rgb_image)
-        
-        if results.pose_landmarks:
-            landmarks = results.pose_landmarks.landmark
-            avg_visibility = sum(lm.visibility for lm in landmarks) / len(landmarks)
-            
-            if avg_visibility > best_confidence:
-                best_confidence = avg_visibility
-                best_result = results
-                best_strategy = strategy_name
-    
-    # Analyze pose context
-    context = {
-        'pose_type': 'none',
-        'body_parts_visible': [],
-        'face_prominence': 0.0,
-        'body_coverage': 0.0,
-        'pose_confidence': best_confidence,
-        'detection_strategy': best_strategy,
-        'keypoints_detected': 0,
-        'face_angle_estimate': 0.0,
-        'body_symmetry': 0.0
-    }
-    
-    if not best_result or not best_result.pose_landmarks:
-        return context
-    
-    landmarks = best_result.pose_landmarks.landmark
-    
-    # Define body part keypoint groups
-    body_parts = {
-        'face': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],  # Face landmarks
-        'shoulders': [11, 12],                         # Shoulder landmarks  
-        'arms': [13, 14, 15, 16],                     # Arm landmarks
-        'torso': [11, 12, 23, 24],                    # Torso landmarks
-        'hips': [23, 24],                             # Hip landmarks
-        'legs': [25, 26, 27, 28, 29, 30, 31, 32]     # Leg landmarks
-    }
-    
-    # Calculate visibility for each body part
-    visible_parts = {}
-    total_keypoints = 0
-    
-    for part_name, keypoint_indices in body_parts.items():
-        visible_count = 0
-        for i in keypoint_indices:
-            if i < len(landmarks) and landmarks[i].visibility > 0.3:
-                visible_count += 1
-                total_keypoints += 1
-        
-        visible_parts[part_name] = visible_count / len(keypoint_indices)
-    
-    context['keypoints_detected'] = total_keypoints
-    
-    # Determine pose type based on visible body parts
-    face_vis = visible_parts['face']
-    shoulder_vis = visible_parts['shoulders'] 
-    torso_vis = visible_parts['torso']
-    leg_vis = visible_parts['legs']
-    
-    if face_vis > 0.6:
-        if leg_vis > 0.5:
-            context['pose_type'] = 'full_body'
-        elif torso_vis > 0.5:
-            context['pose_type'] = 'half_body'
-        elif shoulder_vis > 0.5:
-            context['pose_type'] = 'portrait'
-        else:
-            context['pose_type'] = 'face_only'
-    elif leg_vis > 0.4 or torso_vis > 0.4:
-        context['pose_type'] = 'partial'
-    else:
-        context['pose_type'] = 'none'
-    
-    # Calculate face prominence (percentage of image occupied by face)
-    if face_vis > 0.4:
-        face_points = []
-        for i in range(11):  # Face keypoints
-            if i < len(landmarks) and landmarks[i].visibility > 0.3:
-                face_points.append((landmarks[i].x, landmarks[i].y))
-        
-        if len(face_points) >= 4:
-            face_coords = np.array(face_points)
-            face_width = np.max(face_coords[:, 0]) - np.min(face_coords[:, 0])
-            face_height = np.max(face_coords[:, 1]) - np.min(face_coords[:, 1])
-            context['face_prominence'] = min(100.0, (face_width * face_height) * 150)
-    
-    # Estimate face angle (basic frontal vs profile detection)
-    if face_vis > 0.5 and len(landmarks) > 10:
-        nose = landmarks[0]
-        left_eye = landmarks[2] if landmarks[2].visibility > 0.3 else None
-        right_eye = landmarks[5] if landmarks[5].visibility > 0.3 else None
-        
-        if left_eye and right_eye:
-            # Calculate face angle based on eye positions
-            eye_diff = abs(left_eye.x - right_eye.x)
-            context['face_angle_estimate'] = min(90.0, eye_diff * 180)  # Rough estimate
-    
-    # Calculate body symmetry
-    if shoulder_vis > 0.5 and len(landmarks) > 12:
-        left_shoulder = landmarks[11]
-        right_shoulder = landmarks[12]
-        if left_shoulder.visibility > 0.3 and right_shoulder.visibility > 0.3:
-            shoulder_balance = 1.0 - abs(left_shoulder.y - right_shoulder.y)
-            context['body_symmetry'] = max(0.0, min(1.0, shoulder_balance))
-    
-    context['body_parts_visible'] = [part for part, ratio in visible_parts.items() if ratio > 0.3]
-    context['body_coverage'] = sum(visible_parts.values()) / len(visible_parts)
-    
-    return context
+    # Ensure image is in BGR format for OpenCV
+    if isinstance(image, Image.Image):
+        image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-def extract_context_features(context):
-    """Convert pose context to numerical feature vector"""
-    
-    features = np.zeros(CONTEXT_FEATURE_SIZE, dtype=np.float32)
-    
-    # Pose type one-hot encoding (6 dimensions)
-    pose_type_idx = POSE_TYPES.get(context['pose_type'], 0)
-    if pose_type_idx < 6:
-        features[pose_type_idx] = 1.0
-    
-    # Body part visibility (6 dimensions)
-    body_part_names = ['face', 'shoulders', 'arms', 'torso', 'hips', 'legs']
-    for i, part in enumerate(body_part_names):
-        if part in [bp.split('_')[0] for bp in context['body_parts_visible']]:
-            features[6 + i] = 1.0
-    
-    # Continuous features (8 dimensions)
-    features[12] = min(1.0, context['face_prominence'] / 100.0)  # Normalized face prominence
-    features[13] = min(1.0, context['body_coverage'])           # Body coverage ratio
-    features[14] = min(1.0, context['pose_confidence'])         # Pose detection confidence
-    features[15] = min(1.0, context['keypoints_detected'] / 33) # Keypoint ratio
-    features[16] = min(1.0, context['face_angle_estimate'] / 90) # Face angle
-    features[17] = min(1.0, context['body_symmetry'])           # Body symmetry
-    features[18] = 1.0 if len(context['body_parts_visible']) > 3 else 0.0  # Multi-part visibility
-    features[19] = 1.0 if context['detection_strategy'] != 'none' else 0.0  # Successful detection
-    
-    return features
-
-def extract_pose_features_robust(image, context=None):
-    """Extract pose features with context awareness"""
-    
-    if context is None:
-        context = analyze_pose_context(image)
-    
-    pose_vector = np.zeros(NUM_KEYPOINTS * 2, dtype=np.float32)
-    
-    # Re-run pose detection for feature extraction
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = pose.process(rgb_image)
-    
-    if results and results.pose_landmarks and context['pose_confidence'] > MIN_POSE_CONFIDENCE:
-        landmarks = results.pose_landmarks.landmark
-        
-        for i in range(min(NUM_KEYPOINTS, len(landmarks))):
-            lm = landmarks[i]
-            if lm.visibility > 0.3:
-                pose_vector[i*2] = lm.x
-                pose_vector[i*2 + 1] = lm.y
-    
-    return pose_vector
+    results = pose_detector.process(rgb_image)
+    return 1 if results.pose_landmarks else 0
 
-def grid_color_histogram_enhanced(image, grid_size=GRID_SIZE, bins_per_channel=BINS_PER_CHANNEL):
-    """Enhanced color histogram with better spatial resolution"""
-    h, w = image.shape[:2]
-    rows, cols = grid_size
-    cell_h, cell_w = h // rows, w // cols
-    hist_vecs = []
+# ─── FEATURE EXTRACTION ──────────────────────────────────────────────────────
 
-    for r in range(rows):
-        for c in range(cols):
-            y0, x0 = r * cell_h, c * cell_w
-            y1, x1 = min(y0 + cell_h, h), min(x0 + cell_w, w)
-            cell = image[y0:y1, x0:x1]
+def calculate_color_histogram(image, grid_size=GRID_SIZE):
+    """
+    Calculates a grid-based color histogram in the HSV color space.
+    The image is divided into a grid, and a histogram is computed for each cell.
+    """
+    # Ensure image is in BGR format for OpenCV
+    if isinstance(image, Image.Image):
+        image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+    hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    h, w, _ = hsv_image.shape
+    histograms = []
+
+    cell_h, cell_w = h // grid_size[0], w // grid_size[1]
+
+    for i in range(grid_size[0]):
+        for j in range(grid_size[1]):
+            y1 = i * cell_h
+            y2 = (i + 1) * cell_h
+            x1 = j * cell_w
+            x2 = (j + 1) * cell_w
+            
+            cell = hsv_image[y1:y2, x1:x2]
             
             if cell.size == 0:
-                hist_vecs.append(np.zeros(bins_per_channel**3, dtype=np.float32))
+                histograms.append(np.zeros(H_BINS * S_BINS * V_BINS, dtype=np.float32))
                 continue
+
+            hist = cv2.calcHist(
+                [cell], [0, 1, 2], None, 
+                [H_BINS, S_BINS, V_BINS], 
+                [0, 180, 0, 256, 0, 256]
+            )
             
-            hist = cv2.calcHist([cell], [0,1,2], None,
-                              [bins_per_channel]*3,
-                              [0,256,0,256,0,256]).flatten()
+            # Normalize the histogram
+            cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+            histograms.append(hist.flatten())
             
-            hist_sum = hist.sum()
-            if hist_sum > 0:
-                hist = hist / hist_sum
+    return np.concatenate(histograms).astype(np.float32)
+
+def bin_person_count(count):
+    """
+    Bins the person count into a one-hot encoded vector of size 4.
+    Categories are: 0, 1, 2, and 3+.
+    """
+    binned_vector = np.zeros(4, dtype=np.float32)
+    if count == 0:
+        binned_vector[0] = 1.0
+    elif count == 1:
+        binned_vector[1] = 1.0
+    elif count == 2:
+        binned_vector[2] = 1.0
+    else:
+        binned_vector[3] = 1.0
+    return binned_vector
+
+def extract_features(image_path, weights, person_count_override=None):
+    """
+    Extracts a combined feature vector for a single image.
+    """
+    image = None
+    try:
+        # Try with OpenCV first
+        image = cv2.imread(str(image_path))
+        if image is None:
+            # If OpenCV fails, try with PIL as a fallback
+            pil_img = Image.open(image_path).convert('RGB')
+            image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+        if image is None:
+            print(f"Warning: Could not read image {image_path.name}. Skipping.")
+            return None
+            
+        # ─── PRE-PROCESSING: RESIZE SMALL IMAGES ─────────────────────────────
+        # If the image is smaller than the grid, resize it to prevent zero vectors.
+        min_height = GRID_SIZE[0] * 2
+        min_width = GRID_SIZE[1] * 2
+        h, w, _ = image.shape
+        
+        if h < min_height or w < min_width:
+            # Enlarge small images, maintaining aspect ratio
+            if h < w:
+                new_h = min_height
+                new_w = int(w * (new_h / h))
             else:
-                hist = np.ones(len(hist)) / len(hist)
+                new_w = min_width
+                new_h = int(h * (new_w / w))
             
-            hist_vecs.append(hist.astype(np.float32))
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    return np.concatenate(hist_vecs)
+    except Exception as e:
+        print(f"Warning: Failed to load or resize {image_path.name}. Error: {e}. Skipping.")
+        return None
 
-def extract_context_aware_features(image):
-    """Extract complete context-aware feature set"""
-    
-    # Step 1: Analyze pose context
-    context = analyze_pose_context(image)
-    
-    # Step 2: Extract pose features
-    pose_features = extract_pose_features_robust(image, context)
-    
-    # Step 3: Extract color features  
-    color_features = grid_color_histogram_enhanced(image)
-    
-    # Step 4: Extract context features
-    context_features = extract_context_features(context)
-    
-    # Step 5: Context-aware weighting
-    pose_type = context['pose_type']
-    
-    # Adaptive weights based on pose type
-    if pose_type == 'face_only':
-        pose_weight = 0.2
-        color_weight = 0.7
-        context_weight = 0.1
-    elif pose_type == 'portrait':
-        pose_weight = 0.4
-        color_weight = 0.5
-        context_weight = 0.1
-    elif pose_type in ['half_body', 'full_body']:
-        pose_weight = 0.6
-        color_weight = 0.3
-        context_weight = 0.1
-    else:  # none or partial
-        pose_weight = 0.1
-        color_weight = 0.8
-        context_weight = 0.1
-    
-    # Apply weights
-    weighted_pose = pose_features * pose_weight
-    weighted_color = color_features * color_weight
-    weighted_context = context_features * context_weight
-    
-    # Combine all features
-    combined_features = np.concatenate([weighted_pose, weighted_color, weighted_context])
-    
-    return {
-        'combined_features': combined_features,
-        'pose_features': pose_features,
-        'color_features': color_features,
-        'context_features': context_features,
-        'weights': {
-            'pose_weight': pose_weight,
-            'color_weight': color_weight,
-            'context_weight': context_weight
-        },
-        'context': context,
-        'feature_dimensions': {
-            'pose': len(pose_features),
-            'color': len(color_features), 
-            'context': len(context_features),
-            'total': len(combined_features)
-        }
-    }
+    try:
+        # 1. Color Histogram
+        color_features = calculate_color_histogram(image)
 
-def process_images():
-    """Process all poster images and extract context-aware features"""
-    
-    covers_path = Path(COVERS_DIR)
-    if not covers_path.exists():
-        print(f"❌ Covers directory not found: {COVERS_DIR}")
+        # 2. Person Count
+        if person_count_override is not None:
+            person_count = person_count_override
+        else:
+            person_count = detect_person_count(image)
+        
+        person_features = bin_person_count(person_count)
+
+        # 3. Apply weights and combine
+        weighted_color = color_features * weights.get('color', 1.0)
+        weighted_person = person_features * weights.get('person', 1.0)
+
+        return np.concatenate([weighted_color, weighted_person])
+    except Exception as e:
+        print(f"Warning: Failed to extract features for {image_path.name}. Error: {e}. Skipping.")
+        return None
+
+# ─── MAIN PROCESSING ─────────────────────────────────────────────────────────
+
+def process_images_in_directory(input_dir, output_file, weights, person_count_override=None, limit=None):
+    """
+    Processes all images in a directory, extracts features, and saves to a TSV file.
+    """
+    input_path = Path(input_dir)
+    if not input_path.is_dir():
+        print(f"Error: Input directory not found at {input_dir}")
         return
-    
-    # Get all image files
-    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
-    image_files = [f for f in covers_path.iterdir() 
-                   if f.suffix.lower() in image_extensions]
-    
-    print(f"🎬 Found {len(image_files)} poster images")
-    print(f"📁 Output: {OUTPUT_FILE}")
-    print(f"🧠 Features: Context-aware pose + enhanced color + metadata")
-    print("=" * 60)
-    
-    # Check for existing progress
-    processed_files = set()
-    if os.path.exists(OUTPUT_FILE):
-        print("📂 Found existing output file, checking progress...")
-        with open(OUTPUT_FILE, 'r') as f:
-            for line in f:
-                data = json.loads(line.strip())
-                processed_files.add(data['filename'])
-        print(f"✅ {len(processed_files)} files already processed")
-    
-    # Process images with progress bar
-    stats = {
-        'total_processed': len(processed_files),
-        'pose_types': {pt: 0 for pt in POSE_TYPES.keys()},
-        'average_confidence': 0.0,
-        'processing_errors': 0
-    }
-    
-    with open(OUTPUT_FILE, 'a') as f:
-        for img_file in tqdm(image_files, desc="Extracting features"):
-            filename = img_file.name
-            
-            # Skip if already processed
-            if filename in processed_files:
-                continue
-            
-            try:
-                # Load and process image
-                img = cv2.imread(str(img_file))
-                if img is None:
-                    print(f"⚠️  Could not load: {filename}")
-                    stats['processing_errors'] += 1
-                    continue
-                
-                # Extract context-aware features
-                feature_data = extract_context_aware_features(img)
-                
-                # Update statistics
-                stats['total_processed'] += 1
-                pose_type = feature_data['context']['pose_type']
-                stats['pose_types'][pose_type] += 1
-                stats['average_confidence'] += feature_data['context']['pose_confidence']
-                
-                # Prepare output record
-                record = {
-                    'filename': filename,
-                    'features': feature_data['combined_features'].tolist(),
-                    'pose_confidence': float(feature_data['context']['pose_confidence']),
-                    'pose_type': pose_type,
-                    'detected_keypoints': int(feature_data['context']['keypoints_detected']),
-                    'face_prominence': float(feature_data['context']['face_prominence']),
-                    'body_coverage': float(feature_data['context']['body_coverage']),
-                    'detection_strategy': feature_data['context']['detection_strategy'],
-                    'body_parts_visible': feature_data['context']['body_parts_visible'],
-                    'adaptive_weights': feature_data['weights'],
-                    'feature_dimensions': feature_data['feature_dimensions'],
-                    'context_metadata': feature_data['context']
-                }
-                
-                # Write to file
-                f.write(json.dumps(record) + '\n')
-                f.flush()
-                
-            except Exception as e:
-                print(f"❌ Error processing {filename}: {e}")
-                stats['processing_errors'] += 1
-                continue
-    
-    # Final statistics
-    if stats['total_processed'] > 0:
-        stats['average_confidence'] /= stats['total_processed']
-    
-    print("\n" + "="*60)
-    print("🎯 EXTRACTION COMPLETE")
-    print("="*60)
-    print(f"📊 Total images processed: {stats['total_processed']:,}")
-    print(f"📈 Average pose confidence: {stats['average_confidence']:.3f}")
-    print(f"❌ Processing errors: {stats['processing_errors']}")
-    print("\n📋 Pose Type Distribution:")
-    for pose_type, count in stats['pose_types'].items():
-        if count > 0:
-            percentage = (count / stats['total_processed']) * 100
-            print(f"   {pose_type}: {count:,} ({percentage:.1f}%)")
-    
-    print(f"\n💾 Features saved to: {OUTPUT_FILE}")
-    file_size = os.path.getsize(OUTPUT_FILE) / (1024**3)
-    print(f"📦 File size: {file_size:.2f} GB")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract context-aware features from movie posters")
-    parser.add_argument('--covers-dir', default=COVERS_DIR, help='Directory containing poster images')
-    parser.add_argument('--output', default=OUTPUT_FILE, help='Output JSONL file')
-    parser.add_argument('--resume', action='store_true', help='Resume from existing output file')
-    
+    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
+    image_files = [f for f in input_path.iterdir() if f.suffix.lower() in image_extensions]
+
+    if limit:
+        image_files = image_files[:limit]
+        print(f"Processing a limited set of {len(image_files)} images.")
+
+    print(f"Found {len(image_files)} images to process in '{input_dir}'.")
+    print(f"Output will be saved to '{output_file}'.")
+
+    processed_files = set()
+    if os.path.exists(output_file):
+        print("Output file exists. Resuming...")
+        with open(output_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    processed_files.add(line.split('\t')[0])
+                except IndexError:
+                    continue # Skip malformed lines
+        print(f"Skipping {len(processed_files)} already processed files.")
+
+    with open(output_file, 'a', encoding='utf-8') as f_out:
+        for image_file in tqdm(image_files, desc="Extracting Features"):
+            if image_file.name in processed_files:
+                continue
+
+            features = extract_features(image_file, weights, person_count_override=person_count_override)
+            if features is not None:
+                feature_str = ",".join([f"{x:.8f}" for x in features])
+                f_out.write(f"{image_file.name}\t{feature_str}\n")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Extract features from movie posters.")
+    parser.add_argument('--input_dir', type=str, default=COVERS_DIR, help="Directory of poster images.")
+    parser.add_argument('--output_file', type=str, default=OUTPUT_FILE, help="Path to the output TSV file.")
+    parser.add_argument('--config', type=str, default=CONFIG_FILE, help="Path to the config file for feature weights.")
+    parser.add_argument('--limit', type=int, default=None, help="Limit the number of images to process for testing.")
     args = parser.parse_args()
-    
-    COVERS_DIR = args.covers_dir
-    OUTPUT_FILE = args.output
-    
-    process_images()
+
+    weights = load_weights(args.config)
+    print(f"Using feature weights: {weights}")
+
+    process_images_in_directory(args.input_dir, args.output_file, weights, limit=args.limit)

@@ -16,14 +16,16 @@ from tqdm import tqdm
 from datetime import datetime
 import argparse
 
+# Get the directory where the script is located
+SCRIPT_DIR = Path(__file__).parent.resolve()
+
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
-FEATURES_FILE = '../process_step_1/context_aware_poster_features.jsonl'
-INDEX_OUTPUT = 'context_aware_poster_index.faiss'
-METADATA_OUTPUT = 'context_aware_poster_metadata.json'
-CHECKPOINT_FILE = 'index_build_checkpoint.json'
-CHECKPOINT_DIR = 'checkpoints'
-FEATURES_CACHE = 'features_cache.npz'  # Cache for features to avoid reloading
-CHECKPOINT_DIR = 'checkpoints'  # Directory for separate checkpoint files
+FEATURES_FILE = SCRIPT_DIR / '../process_step_1/features.tsv'
+INDEX_OUTPUT = SCRIPT_DIR / 'context_aware_poster_index.faiss'
+METADATA_OUTPUT = SCRIPT_DIR / 'context_aware_poster_metadata.json'
+CHECKPOINT_FILE = SCRIPT_DIR / 'index_build_checkpoint.json'
+FEATURES_CACHE = SCRIPT_DIR / 'features_cache.npz'
+CHECKPOINT_DIR = SCRIPT_DIR / 'checkpoints'
 
 def check_existing_progress():
     """Check if there's an existing checkpoint to resume from"""
@@ -41,7 +43,7 @@ def check_existing_progress():
             checkpoint.get('status') == 'complete'):
             print("✅ Index already built and complete!")
             return 'complete', checkpoint
-        elif checkpoint.get('status') in ['building', 'partial', 'features_loaded', 'training', 'starting', 'counting_complete', 'loading_features', 'converting_to_numpy', 'test']:
+        elif checkpoint.get('status') in ['building', 'partial', 'features_loaded', 'training', 'starting', 'counting_complete', 'loading_features', 'converting_to_numpy']:
             print("🔄 Partial build found, ready to resume...")
             return 'partial', checkpoint
     
@@ -52,61 +54,13 @@ def check_existing_progress():
     
     return 'new', None
 
-def save_separate_checkpoint(phase: str, data: dict):
-    """Save a checkpoint for a specific phase in a separate file."""
-    try:
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-        checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{phase}_checkpoint.json")
-        
-        with open(checkpoint_path, 'w') as f:
-            json.dump({
-                'timestamp': datetime.now().isoformat(),
-                'phase': phase,
-                **data
-            }, f, indent=2)
-        
-        print(f"✅ Checkpoint saved: {checkpoint_path}")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to save {phase} checkpoint: {e}")
-        return False
-
-
-def load_separate_checkpoint(phase: str) -> dict:
-    """Load a checkpoint for a specific phase from a separate file."""
-    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{phase}_checkpoint.json")
-    
-    if not os.path.exists(checkpoint_path):
-        return {}
-    
-    try:
-        with open(checkpoint_path, 'r') as f:
-            data = json.load(f)
-        print(f"✅ Loaded {phase} checkpoint from {checkpoint_path}")
-        return data
-    except Exception as e:
-        print(f"❌ Failed to load {phase} checkpoint: {e}")
-        return {}
-
-
-def cleanup_phase_checkpoint(phase: str):
-    """Remove a checkpoint file for a completed phase."""
-    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{phase}_checkpoint.json")
-    
-    if os.path.exists(checkpoint_path):
-        try:
-            os.remove(checkpoint_path)
-            print(f"🗑️ Cleaned up {phase} checkpoint")
-        except Exception as e:
-            print(f"❌ Failed to cleanup {phase} checkpoint: {e}")
-
 
 def save_checkpoint(status, data=None):
     """Save checkpoint information"""
     
     checkpoint = {
         'status': status,
-        'timestamp': str(Path(CHECKPOINT_FILE).stat().st_mtime if os.path.exists(CHECKPOINT_FILE) else 0),
+        'timestamp': datetime.now().isoformat(),
         'data': data or {}
     }
     
@@ -182,15 +136,6 @@ def load_features_and_metadata(use_cache=True, resume_checkpoint=None):
     
     features_list = []
     filenames = []
-    pose_confidences = []
-    pose_types = []
-    face_prominences = []
-    body_coverages = []
-    detected_keypoints = []
-    detection_strategies = []
-    body_parts_visible = []
-    adaptive_weights = []
-    context_metadata = []
     
     error_count = 0
     
@@ -201,18 +146,11 @@ def load_features_and_metadata(use_cache=True, resume_checkpoint=None):
                 next(f)
             for line_num, line in enumerate(f, resume_lines + 1):
                 try:
-                    data = json.loads(line.strip())
-                    features_list.append(data['features'])
-                    filenames.append(data['filename'])
-                    pose_confidences.append(data['pose_confidence'])
-                    pose_types.append(data['pose_type'])
-                    face_prominences.append(data['face_prominence'])
-                    body_coverages.append(data['body_coverage'])
-                    detected_keypoints.append(data['detected_keypoints'])
-                    detection_strategies.append(data['detection_strategy'])
-                    body_parts_visible.append(data['body_parts_visible'])
-                    adaptive_weights.append(data['adaptive_weights'])
-                    context_metadata.append(data['context_metadata'])
+                    filename, features_str = line.strip().split('\t')
+                    features = [float(x) for x in features_str.split(',')]
+                    features_list.append(features)
+                    filenames.append(filename)
+
                     # Progress update and checkpoint every 1000 records
                     if line_num % 1000 == 0:
                         progress = (line_num / total_lines) * 100
@@ -224,7 +162,7 @@ def load_features_and_metadata(use_cache=True, resume_checkpoint=None):
                             'progress': progress,
                             'features_loaded': len(features_list) + resume_lines
                         })
-                except (json.JSONDecodeError, KeyError) as e:
+                except (ValueError, IndexError) as e:
                     error_count += 1
                     if error_count <= 10:  # Only show first 10 errors
                         print(f"⚠️  Error parsing line {line_num}: {e}")
@@ -268,43 +206,11 @@ def load_features_and_metadata(use_cache=True, resume_checkpoint=None):
     # Compile metadata
     metadata = {
         'filenames': filenames,
-        'pose_confidences': pose_confidences,
-        'pose_types': pose_types,
-        'face_prominences': face_prominences,
-        'body_coverages': body_coverages,
-        'detected_keypoints': detected_keypoints,
-        'detection_strategies': detection_strategies,
-        'body_parts_visible': body_parts_visible,
-        'adaptive_weights': adaptive_weights,
-        'context_metadata': context_metadata,
         'index_stats': {
             'total_posters': len(features_list),
             'feature_dimensions': features_matrix.shape[1],
-            'average_pose_confidence': float(np.mean(pose_confidences)),
-            'average_face_prominence': float(np.mean(face_prominences)),
-            'average_body_coverage': float(np.mean(body_coverages)),
-            'pose_type_distribution': {},
-            'detection_strategy_distribution': {}
         }
     }
-    
-    # Calculate pose type distribution
-    from collections import Counter
-    pose_counter = Counter(pose_types)
-    strategy_counter = Counter(detection_strategies)
-    
-    total_posters = len(pose_types)
-    for pose_type, count in pose_counter.items():
-        metadata['index_stats']['pose_type_distribution'][pose_type] = {
-            'count': count,
-            'percentage': (count / total_posters) * 100
-        }
-    
-    for strategy, count in strategy_counter.items():
-        metadata['index_stats']['detection_strategy_distribution'][strategy] = {
-            'count': count,
-            'percentage': (count / total_posters) * 100
-        }
     
     # Cache the features and metadata for faster resume
     print("💾 Caching features for faster resume...")
@@ -328,7 +234,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
     print(f"   Dimensions: {n_dimensions}")
     
     # Check if we can resume from checkpoint
-    if resume_checkpoint and (os.path.exists(INDEX_OUTPUT) or os.path.exists(f"{INDEX_OUTPUT}.tmp")):
+    if resume_checkpoint and (os.path.exists(str(INDEX_OUTPUT)) or os.path.exists(f"{str(INDEX_OUTPUT)}.tmp")):
         print("🔄 Checking existing index for resume...")
         
         # Validate checkpoint and index consistency
@@ -338,7 +244,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
         
         try:
             # Try loading the main index first, then temporary
-            index_path = INDEX_OUTPUT if os.path.exists(INDEX_OUTPUT) else f"{INDEX_OUTPUT}.tmp"
+            index_path = str(INDEX_OUTPUT) if os.path.exists(str(INDEX_OUTPUT)) else f"{str(INDEX_OUTPUT)}.tmp"
             index = faiss.read_index(index_path)
             
             # Comprehensive validation
@@ -377,7 +283,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
                 print("🧹 Cleaning up corrupted files and restarting...")
                 
                 # Clean up corrupted files
-                cleanup_files = [INDEX_OUTPUT, f"{INDEX_OUTPUT}.tmp", CHECKPOINT_FILE, f"{METADATA_OUTPUT}.cache"]
+                cleanup_files = [str(INDEX_OUTPUT), f"{str(INDEX_OUTPUT)}.tmp", str(CHECKPOINT_FILE), f"{str(METADATA_OUTPUT)}.cache"]
                 for cleanup_file in cleanup_files:
                     if os.path.exists(cleanup_file):
                         try:
@@ -394,12 +300,12 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
                 print("✅ Index already complete and valid!")
                 # If we loaded from temp, save as final
                 if index_path.endswith('.tmp'):
-                    faiss.write_index(index, INDEX_OUTPUT)
+                    faiss.write_index(index, str(INDEX_OUTPUT))
                     print("💾 Promoted temporary index to final")
                 return index
                 
             elif index.ntotal > 0:
-                print(f"✅ Valid partial index found: {index.ntotal:,}/{n_vectors:,} vectors ({(index.ntotal/n_vectors)*100:.1f}%)")
+                print(f"✅ Valid partial index found: {index.ntotal:,}/{n_vectors:,} ({(index.ntotal/n_vectors)*100:.1f}%)")
                 
                 # Resume from validated index
                 resume_batch_size = override_batch_size or checkpoint_data.get('batch_size', min(1000, max(250, n_vectors // 100)))
@@ -422,7 +328,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
                         print(f"   Resume Batch {batch_num}/{remaining_batches}: {progress:.1f}% ({index.ntotal:,}/{n_vectors:,})")
                         
                         # Save progress more frequently for VS Code stability
-                        temp_index_path = f"{INDEX_OUTPUT}.tmp"
+                        temp_index_path = f"{str(INDEX_OUTPUT)}.tmp"
                         try:
                             faiss.write_index(index, temp_index_path)
                             save_checkpoint('building', {
@@ -453,7 +359,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
             print("🔨 Building new index...")
             
             # Clean up potentially corrupted files
-            for cleanup_file in [INDEX_OUTPUT, f"{INDEX_OUTPUT}.tmp"]:
+            for cleanup_file in [str(INDEX_OUTPUT), f"{str(INDEX_OUTPUT)}.tmp"]:
                 if os.path.exists(cleanup_file):
                     try:
                         os.remove(cleanup_file)
@@ -514,7 +420,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
                 
                 # Add batch with error handling
                 try:
-                    index.add(batch)
+                    index.add(n=batch.shape[0], x=batch)
                 except Exception as add_error:
                     print(f"❌ Failed to add batch at {i}: {add_error}")
                     # Save what we have so far
@@ -533,7 +439,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
                 print(f"   Batch {batch_num:,}/{total_batches:,}: {progress:.1f}% ({index.ntotal:,}/{n_vectors:,})")
                 
                 # Save progress checkpoint EVERY batch for reliable resume
-                temp_index_path = f"{INDEX_OUTPUT}.tmp"
+                temp_index_path = f"{str(INDEX_OUTPUT)}.tmp"
                 try:
                     faiss.write_index(index, temp_index_path)
                     save_checkpoint('building', {
@@ -570,7 +476,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
         for i in range(0, n_vectors, batch_size):
             end_idx = min(i + batch_size, n_vectors)
             batch = features_matrix[i:end_idx]
-            index.add(batch)
+            index.add(n=batch.shape[0], x=batch)
             
             # Simple progress update
             progress = (index.ntotal / n_vectors) * 100
@@ -587,7 +493,7 @@ def save_index_and_metadata(index, metadata):
     """Save FAISS index and metadata to disk"""
     
     print(f"💾 Saving index to: {INDEX_OUTPUT}")
-    faiss.write_index(index, INDEX_OUTPUT)
+    faiss.write_index(index, str(INDEX_OUTPUT))
     
     print(f"💾 Saving metadata to: {METADATA_OUTPUT}")
     with open(METADATA_OUTPUT, 'w') as f:
@@ -611,27 +517,17 @@ def print_statistics(metadata):
     
     print(f"🎬 Total posters: {stats['total_posters']:,}")
     print(f"📐 Feature dimensions: {stats['feature_dimensions']}")
-    print(f"🎯 Average pose confidence: {stats['average_pose_confidence']:.3f}")
-    print(f"👤 Average face prominence: {stats['average_face_prominence']:.1f}%")
-    print(f"🫂 Average body coverage: {stats['average_body_coverage']:.3f}")
-    
-    print("\n📋 Pose Type Distribution:")
-    for pose_type, data in stats['pose_type_distribution'].items():
-        print(f"   {pose_type:12}: {data['count']:6,} ({data['percentage']:5.1f}%)")
-    
-    print("\n🔍 Detection Strategy Distribution:")
-    for strategy, data in stats['detection_strategy_distribution'].items():
-        print(f"   {strategy:20}: {data['count']:6,} ({data['percentage']:5.1f}%)")
     
     print("="*60)
 
 def main():
     """Main index building process with resume capability"""
     
+    global FEATURES_FILE, INDEX_OUTPUT, METADATA_OUTPUT, FEATURES_CACHE, CHECKPOINT_FILE, CHECKPOINT_DIR
     parser = argparse.ArgumentParser(description="Build context-aware FAISS index with resume capability")
-    parser.add_argument('--features-file', default=FEATURES_FILE, help='Input features JSONL file')
-    parser.add_argument('--index-output', default=INDEX_OUTPUT, help='Output FAISS index file')
-    parser.add_argument('--metadata-output', default=METADATA_OUTPUT, help='Output metadata JSON file')
+    parser.add_argument('--features-file', default=str(FEATURES_FILE), help='Input features JSONL file')
+    parser.add_argument('--index-output', default=str(INDEX_OUTPUT), help='Output FAISS index file')
+    parser.add_argument('--metadata-output', default=str(METADATA_OUTPUT), help='Output metadata JSON file')
     parser.add_argument('--force-rebuild', action='store_true', help='Force rebuild even if index exists')
     parser.add_argument('--vscode-friendly', action='store_true', help='Use simpler output for VS Code terminal')
     parser.add_argument('--batch-size', type=int, help='Override default batch size')
@@ -641,16 +537,22 @@ def main():
     args = parser.parse_args()
     
     # Use command line arguments for file paths
-    features_file = args.features_file
-    index_output = args.index_output
-    metadata_output = args.metadata_output
+    FEATURES_FILE = Path(args.features_file)
+    INDEX_OUTPUT = Path(args.index_output)
+    METADATA_OUTPUT = Path(args.metadata_output)
     
+    # Re-derive script-relative paths from the potentially new INDEX_OUTPUT path
+    SCRIPT_DIR = INDEX_OUTPUT.parent
+    CHECKPOINT_FILE = SCRIPT_DIR / 'index_build_checkpoint.json'
+    FEATURES_CACHE = SCRIPT_DIR / 'features_cache.npz'
+    CHECKPOINT_DIR = SCRIPT_DIR / 'checkpoints'
+
     print("🚀 Context-Aware FAISS Index Builder")
     print("="*60)
     
     # Clear cache if requested
     if args.clear_cache:
-        cache_files = [FEATURES_CACHE, f"{METADATA_OUTPUT}.cache", CHECKPOINT_FILE, f"{INDEX_OUTPUT}.tmp"]
+        cache_files = [str(FEATURES_CACHE), f"{str(METADATA_OUTPUT)}.cache", str(CHECKPOINT_FILE), f"{str(INDEX_OUTPUT)}.tmp"]
         for cache_file in cache_files:
             if os.path.exists(cache_file):
                 os.remove(cache_file)
@@ -691,13 +593,9 @@ def main():
     save_checkpoint('complete', {
         'total_vectors': index.ntotal,
         'feature_dimensions': features_matrix.shape[1],
-        'index_file': index_output,
-        'metadata_file': metadata_output
+        'index_file': str(INDEX_OUTPUT),
+        'metadata_file': str(METADATA_OUTPUT)
     })
-    
-    # Clean up separate checkpoint files
-    cleanup_phase_checkpoint('feature_loading')
-    cleanup_phase_checkpoint('index_building')
     
     # Step 5: Print statistics
     print_statistics(metadata)
@@ -706,7 +604,7 @@ def main():
     print(f"🎯 Ready for intelligent movie poster matching!")
     
     # Clean up temporary files
-    temp_files = [f"{index_output}.tmp", f"{metadata_output}.tmp"]
+    temp_files = [f"{str(INDEX_OUTPUT)}.tmp", f"{str(METADATA_OUTPUT)}.tmp"]
     for temp_file in temp_files:
         if os.path.exists(temp_file):
             os.remove(temp_file)

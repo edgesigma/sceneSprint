@@ -2,3 +2,7 @@ covers/
 process_step_1/subset/
 server/composites/
 */bak/*
+*bak/*
+*.faiss
+*.jsonl
+*.tsv

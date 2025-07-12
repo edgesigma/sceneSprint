@@ -1,0 +1,7 @@
+{
+  "feature_weights": {
+    "pose": 0.5,
+    "color": 1.0,
+    "context": 0.8
+  }
+}

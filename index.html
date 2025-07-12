@@ -51,10 +51,28 @@
     const matchImage  = document.getElementById('match-image');
     const shareBtns   = document.getElementById('share-buttons');
 
-    // request webcam
-    navigator.mediaDevices.getUserMedia({ video: true })
+    // request webcam with portrait-oriented constraints
+    const constraints = {
+      video: {
+        aspectRatio: { ideal: 2/3 },
+        facingMode: 'user'
+      }
+    };
+
+    navigator.mediaDevices.getUserMedia(constraints)
       .then(stream => { video.srcObject = stream; })
-      .catch(err => { alert('Camera access error: ' + err); });
+      .catch(err => {
+        console.error("getUserMedia error: ", err);
+        // Fallback to default camera if aspect ratio fails
+        if (err.name === 'OverconstrainedError' || err.name === 'ConstraintNotSatisfiedError') {
+          console.log("Portrait mode failed, falling back to default camera...");
+          navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => { video.srcObject = stream; })
+            .catch(fallbackErr => alert('Camera access error: ' + fallbackErr));
+        } else {
+          alert('Camera access error: ' + err);
+        }
+      });
 
     readyBtn.addEventListener('click', () => {
       // grab frame
