@@ -319,7 +319,7 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
                     for i in range(next_start, n_vectors, resume_batch_size):
                         end_idx = min(i + resume_batch_size, n_vectors)
                         batch = features_matrix[i:end_idx]
-                        index.add(batch)
+                        index.add(x=batch)
                         
                         progress = (index.ntotal / n_vectors) * 100
                         batch_num = (i - next_start) // resume_batch_size + 1
@@ -420,7 +420,8 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
                 
                 # Add batch with error handling
                 try:
-                    index.add(n=batch.shape[0], x=batch)
+                    # Corrected call to index.add, which expects only the data
+                    index.add(batch)
                 except Exception as add_error:
                     print(f"❌ Failed to add batch at {i}: {add_error}")
                     # Save what we have so far
@@ -476,7 +477,8 @@ def build_faiss_index(features_matrix, resume_checkpoint=None, override_batch_si
         for i in range(0, n_vectors, batch_size):
             end_idx = min(i + batch_size, n_vectors)
             batch = features_matrix[i:end_idx]
-            index.add(n=batch.shape[0], x=batch)
+            # Corrected call to index.add, which expects only the data
+            index.add(batch)
             
             # Simple progress update
             progress = (index.ntotal / n_vectors) * 100

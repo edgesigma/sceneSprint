@@ -1,9 +1,9 @@
 {
   "status": "complete",
-  "timestamp": "2025-07-11T22:18:52.265002",
+  "timestamp": "2025-07-12T07:04:44.534479",
   "data": {
-    "total_vectors": 2061,
-    "feature_dimensions": 2052,
+    "total_vectors": 1000,
+    "feature_dimensions": 3076,
     "index_file": "/var/llm/movieNight/movieNight/process_step_2/context_aware_poster_index.faiss",
     "metadata_file": "/var/llm/movieNight/movieNight/process_step_2/context_aware_poster_metadata.json"
   }

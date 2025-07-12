@@ -26,7 +26,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 COVERS_DIR = SCRIPT_DIR / '../covers'
 OUTPUT_FILE = SCRIPT_DIR / 'features.tsv'
-GRID_SIZE = (4, 4)
+GRID_SIZE = (6, 4) # 6 rows, 4 columns for portrait orientation
 # HSV bins: 8 for Hue, 4 for Saturation, 4 for Value
 H_BINS = 8
 S_BINS = 4
@@ -90,10 +90,12 @@ def calculate_color_histogram(image, grid_size=GRID_SIZE):
     h, w, _ = hsv_image.shape
     histograms = []
 
-    cell_h, cell_w = h // grid_size[0], w // grid_size[1]
+    # Correctly unpack grid_size for rows and columns
+    rows, cols = grid_size
+    cell_h, cell_w = h // rows, w // cols
 
-    for i in range(grid_size[0]):
-        for j in range(grid_size[1]):
+    for i in range(rows):
+        for j in range(cols):
             y1 = i * cell_h
             y2 = (i + 1) * cell_h
             x1 = j * cell_w
@@ -102,6 +104,7 @@ def calculate_color_histogram(image, grid_size=GRID_SIZE):
             cell = hsv_image[y1:y2, x1:x2]
             
             if cell.size == 0:
+                # Ensure the zero vector has the correct size based on bins
                 histograms.append(np.zeros(H_BINS * S_BINS * V_BINS, dtype=np.float32))
                 continue
 

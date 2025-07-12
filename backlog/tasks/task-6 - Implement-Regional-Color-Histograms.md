@@ -1,9 +1,11 @@
 ---
 id: task-6
 title: Implement Regional Color Histograms
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - copilot
 created_date: '2025-07-12'
+updated_date: '2025-07-12'
 labels: []
 dependencies: []
 ---
